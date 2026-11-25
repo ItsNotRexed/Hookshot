@@ -93,6 +93,7 @@ static int cmp_range_lo(const void *a, const void *b) {
     const uint64_t x = ((const uint64_t *)a)[0], y = ((const uint64_t *)b)[0];
     return x < y ? -1 : x > y;
 }
+extern uint8_t a64_dirty_sum[];
 static int64_t collect_in(const uint64_t (*ranges)[2], int nranges, uint32_t **pages) {
     size_t n = 0, cap = 4096;
     uint32_t *out = malloc(cap * sizeof *out);
@@ -126,6 +127,17 @@ static int64_t collect_in(const uint64_t (*ranges)[2], int nranges, uint32_t **p
         if (p1 > A64_DIRTY_PAGES) p1 = A64_DIRTY_PAGES;
         if (p1 <= upto) continue;
         for (uint64_t p = lo >> 12 < upto ? upto : lo >> 12; p < p1;) {
+            /* (Tweek) a whole chunk of 256 pages: skipped when its summary byte is clear (no
+               mark since its last whole scan), else the byte cleared first (an exchange: a full barrier) and the chunk read
+               as before. A mark's page store comes before its summary store, so a mark the reads below miss sets the byte
+               again after the exchange, and the next collection reads it. A part of a chunk leaves the byte as it is. */
+            if (!(p & 255) && p + 256 <= p1) {
+                if (!__atomic_load_n(&a64_dirty_sum[p >> 8], __ATOMIC_ACQUIRE)) {
+                    p += 256;
+                    continue;
+                }
+                __atomic_exchange_n(&a64_dirty_sum[p >> 8], 0, __ATOMIC_ACQ_REL);
+            }
             if (!(p & 255) && p + 256 <= p1) {   /* (256 pages at a time while none is marked) */
                 v64x4 a, b, c, d, e, f, g, h, o;
                 __builtin_memcpy(&a, &a64_dirty[p], 32);
